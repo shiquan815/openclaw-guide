@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GitHub 对当前 OpenClaw 工作区进行备份与回滚操作指南</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --card: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --accent: #2563eb;
+      --codebg: #0f172a;
+      --codefg: #e5e7eb;
+      --note: #eff6ff;
+      --warn: #fff7ed;
+      --ok: #ecfdf5;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 32px 20px 60px;
+    }
+    .hero, .section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
+      margin-bottom: 20px;
+    }
+    h1, h2, h3 { line-height: 1.3; margin-top: 0; }
+    h1 { font-size: 32px; margin-bottom: 12px; }
+    h2 { font-size: 24px; margin-bottom: 14px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+    h3 { font-size: 18px; margin-bottom: 8px; margin-top: 22px; }
+    p { margin: 10px 0; }
+    ul, ol { padding-left: 22px; }
+    li { margin: 6px 0; }
+    code {
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 2px 6px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.95em;
+    }
+    pre {
+      background: var(--codebg);
+      color: var(--codefg);
+      padding: 16px;
+      border-radius: 12px;
+      overflow-x: auto;
+      border: 1px solid #1e293b;
+      margin: 12px 0;
+    }
+    pre code {
+      background: transparent;
+      border: 0;
+      padding: 0;
+      color: inherit;
+      font-size: 14px;
+      line-height: 1.7;
+      white-space: pre;
+      display: block;
+    }
+    .note, .warn, .ok {
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin: 12px 0;
+      border: 1px solid var(--border);
+    }
+    .note { background: var(--note); }
+    .warn { background: var(--warn); }
+    .ok { background: var(--ok); }
+    .toc a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .sources li { word-break: break-word; }
+    .footer {
+      color: var(--muted);
+      font-size: 14px;
+      text-align: center;
+      padding-top: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>《GitHub 实现 OpenClaw 工作区备份与回滚操作指南》</h1>
+      <p>适用目标：将当前 <code>~/.openclaw/workspace</code> 纳入 GitHub 私有仓库，形成可持续备份、可追溯、可回滚的版本化工作区管理方案。</p>
+      <div class="note"><strong>边界先说清：</strong>本指南解决的是 <strong>OpenClaw 工作区</strong> 的备份与回滚，不等于 OpenClaw 完整运行态灾备。完整恢复还需要额外备份整个 <code>~/.openclaw/</code> 状态目录。</div>
+      <div class="toc">
+        <h3>目录</h3>
+        <ol>
+          <li><a href="#scope">适用范围与原则</a></li>
+          <li><a href="#repo">GitHub 建仓要求</a></li>
+          <li><a href="#first">首次接入：把 workspace 纳入 Git 管理</a></li>
+          <li><a href="#ssh">SSH 首次连接与认证排错</a></li>
+          <li><a href="#daily">日常备份操作</a></li>
+          <li><a href="#rollback">回滚与恢复操作</a></li>
+          <li><a href="#full">完整状态备份补充方案</a></li>
+          <li><a href="#sop">最短可执行版 SOP</a></li>
+          <li><a href="#sources">参考来源</a></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section" id="scope">
+      <h2>1. 适用范围与原则</h2>
+      <p>OpenClaw 官方文档将 <code>workspace</code> 定义为 agent 的工作目录和工作区上下文所在目录，而 <code>~/.openclaw/</code> 还包含配置、凭据、会话等运行态内容。</p>
+      <div class="ok">
+        <strong>本指南适用于：</strong>
+        <ul>
+          <li>备份当前工作区文件</li>
+          <li>误删、误改、改坏后的快速回滚</li>
+          <li>在新机器或清空环境后重新恢复工作区</li>
+        </ul>
+      </div>
+      <div class="warn">
+        <strong>本指南不直接覆盖：</strong>
+        <ul>
+          <li>账号登录态恢复</li>
+          <li>provider / channel 凭据恢复</li>
+          <li>历史 sessions 恢复</li>
+        </ul>
+      </div>
+      <p>推荐原则是：<strong>GitHub 私有仓库负责工作区版本化备份；离线或加密归档负责完整状态灾备。</strong></p>
+    </section>
+
+    <section class="section" id="repo">
+      <h2>2. GitHub 建仓要求</h2>
+      <p>在 GitHub 网页新建仓库时，建议：</p>
+      <ul>
+        <li><strong>Owner</strong>：你的个人账号，或你有权限的组织</li>
+        <li><strong>Repository name</strong>：例如 <code>openclaw-workspace-backup</code></li>
+        <li><strong>Visibility</strong>：选择 <code>Private</code></li>
+        <li><strong>Add a README file</strong>：不选</li>
+        <li><strong>Add .gitignore</strong>：选 <code>None</code></li>
+        <li><strong>Choose a license</strong>：选 <code>None</code></li>
+      </ul>
+      <div class="note">这样做的目的是让远程仓库保持空仓库状态，避免你本地第一次 <code>git push -u origin main</code> 时出现远程与本地历史冲突。</div>
+    </section>
+
+    <section class="section" id="first">
+      <h2>3. 首次接入：把 workspace 纳入 Git 管理</h2>
+      <h3>步骤 1：进入 OpenClaw 工作区</h3>
+      <pre><code>cd ~/.openclaw/workspace
+
+# 查看当前路径，确认位置正确
+pwd
+
+# 查看目录内容，确认里面确实是你要备份的工作区文件
+ls -la</code></pre>
+      <p>目的：确保后续所有 Git 操作都作用在正确目录，而不是误操作到别的文件夹。</p>
+
+      <h3>步骤 2：初始化 Git 仓库</h3>
+      <pre><code>git init
+
+# 将主分支统一命名为 main，方便与 GitHub 默认命名保持一致
+git branch -M main</code></pre>
+      <p>目的：把当前普通文件夹变成一个 Git 仓库，后续才能提交、推送、回滚、恢复。</p>
+
+      <h3>步骤 3：创建 .gitignore</h3>
+      <pre><code>cat > .gitignore <<'EOF'
+# 忽略日志文件
+*.log
+
+# 忽略临时文件
+*.tmp
+
+# 忽略 macOS Finder 自动生成文件
+.DS_Store
+
+# 你明确不想纳管的大文件、缓存、导出物，可继续往下补
+EOF</code></pre>
+      <p>目的：避免把无关临时文件、日志文件、系统杂项文件一起推上 GitHub。</p>
+
+      <h3>步骤 4：检查待纳管文件</h3>
+      <pre><code># 查看当前 Git 状态，先确认将会纳管哪些文件
+git status</code></pre>
+      <p>目的：防止把不该上传的敏感文件、缓存、临时文件混进仓库。</p>
+
+      <h3>步骤 5：加入暂存区</h3>
+      <pre><code># 将当前目录下所有未被 .gitignore 排除的文件加入暂存区
+git add .
+
+# 再检查一次状态，确认本次提交将包含哪些内容
+git status</code></pre>
+      <p>目的：为第一次提交准备一个清晰、可确认的文件集。</p>
+
+      <h3>步骤 6：生成第一次提交</h3>
+      <pre><code># 形成第一次可回滚的版本基线
+git commit -m "init: backup openclaw workspace"</code></pre>
+      <p>目的：把当前工作区固化为第一个历史版本，后面所有回滚都以此为起点。</p>
+
+      <h3>步骤 7：关联 GitHub 远程仓库</h3>
+      <pre><code># SSH 方式
+# 将下面的“你的用户名/你的仓库名”替换为真实 GitHub 路径
+git remote add origin git@github.com:你的用户名/你的仓库名.git</code></pre>
+      <p>示例：</p>
+      <pre><code>git remote add origin git@github.com:zfzhu/openclaw-workspace-backup.git</code></pre>
+      <p>如果你临时不想用 SSH，也可以用 HTTPS：</p>
+      <pre><code>git remote add origin https://github.com/你的用户名/你的仓库名.git</code></pre>
+
+      <h3>步骤 8：首次推送到 GitHub</h3>
+      <pre><code># 将本地 main 分支推送到远程 origin，并建立默认跟踪关系
+git push -u origin main</code></pre>
+      <p>完成后，这个工作区就已经有了一份 GitHub 远程备份。</p>
+    </section>
+
+    <section class="section" id="ssh">
+      <h2>4. SSH 首次连接与认证排错</h2>
+      <h3>4.1 首次 SSH 连接看到 host authenticity 提示</h3>
+      <pre><code>The authenticity of host 'github.com (...)' can't be established.
+ED25519 key fingerprint is SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU.
+Are you sure you want to continue connecting (yes/no/[fingerprint])?</code></pre>
+      <p>这表示：你的电脑第一次见到 GitHub 服务器，在让你确认是否信任它。如果连接目标确实是 <code>github.com</code>，且指纹匹配 GitHub 官方公布的值，就可以输入：</p>
+      <pre><code>yes</code></pre>
+      <p>之后本机会把 GitHub host key 写入 <code>known_hosts</code>。</p>
+
+      <h3>4.2 如果接着出现 Permission denied (publickey)</h3>
+      <pre><code>git@github.com: Permission denied (publickey).
+fatal: 无法读取远程仓库。</code></pre>
+      <p>这说明：服务器可信已经通过，但你的 <strong>SSH 账号认证</strong> 还没配置好。</p>
+
+      <h3>4.3 检查本机是否已有 SSH key</h3>
+      <pre><code># 查看 ~/.ssh 目录下是否已有密钥文件
+ls -al ~/.ssh</code></pre>
+      <p>常见可用文件包括 <code>id_ed25519</code> 和 <code>id_ed25519.pub</code>。</p>
+
+      <h3>4.4 没有 key 就新建一对</h3>
+      <pre><code># 生成一对新的 Ed25519 SSH key
+# 将“你的GitHub邮箱”替换为你 GitHub 账号使用的邮箱
+ssh-keygen -t ed25519 -C "你的GitHub邮箱"</code></pre>
+      <ul>
+        <li><code>ssh-keygen</code>：生成 SSH 密钥对</li>
+        <li><code>-t ed25519</code>：使用 GitHub 推荐的 Ed25519 算法</li>
+        <li><code>-C</code>：添加备注，便于识别这把 key</li>
+      </ul>
+
+      <h3>4.5 启动 agent 并加载私钥</h3>
+      <pre><code># 启动 ssh-agent
+eval "$(ssh-agent -s)"
+
+# 将你的私钥加入 agent，后续 SSH 连接会自动使用它
+ssh-add ~/.ssh/id_ed25519</code></pre>
+
+      <h3>4.6 打印公钥并添加到 GitHub</h3>
+      <pre><code># 打印公钥内容，复制整行输出
+cat ~/.ssh/id_ed25519.pub</code></pre>
+      <p>然后去 GitHub：<code>Settings → SSH and GPG keys → New SSH key</code>，把公钥粘贴进去。</p>
+
+      <h3>4.7 测试 SSH 是否打通</h3>
+      <pre><code># 测试当前机器是否已能通过 SSH 认证 GitHub
+ssh -T git@github.com</code></pre>
+      <p>如果成功，你会看到包含 GitHub 用户名的认证成功提示。</p>
+    </section>
+
+    <section class="section" id="daily">
+      <h2>5. 日常备份操作</h2>
+      <p>以后每次你修改了工作区内的重要文件，例如 <code>AGENTS.md</code>、<code>MEMORY.md</code>、规则文件、prompt、脚本等，都建议做一次增量备份：</p>
+      <pre><code>cd ~/.openclaw/workspace
+
+# 查看哪些文件发生了变化
+git status
+
+# 把本次变化加入暂存区
+git add .
+
+# 形成一次新的版本记录；建议把说明写具体一点
+git commit -m "backup: update workspace"
+
+# 推送到 GitHub
+git push</code></pre>
+      <p>更推荐的提交说明写法：</p>
+      <pre><code>git commit -m "backup: update AGENTS and MEMORY"
+git commit -m "backup: add weekly prompts"
+git commit -m "backup: adjust workspace rules"</code></pre>
+      <div class="note">最佳习惯：<strong>每次关键改动后立即 commit + push</strong>，不要堆到很久以后再备份。</div>
+    </section>
+
+    <section class="section" id="rollback">
+      <h2>6. 回滚与恢复操作</h2>
+      <h3>场景 A：只恢复某一个文件</h3>
+      <pre><code>cd ~/.openclaw/workspace
+
+# 获取远程最新信息，但不直接改动本地文件
+git fetch origin
+
+# 从远程 main 分支恢复指定文件
+git checkout origin/main -- AGENTS.md</code></pre>
+      <p>适用：你只想恢复某个被改坏的文件，例如 <code>AGENTS.md</code>。</p>
+
+      <h3>场景 B：整个工作区回滚到远程最新版本</h3>
+      <pre><code>cd ~/.openclaw/workspace
+
+# 更新远程引用
+git fetch origin
+
+# 强制将本地工作区重置为远程 main 的状态
+# 注意：这会丢弃本地未提交修改
+git reset --hard origin/main</code></pre>
+      <p>适用：本地改乱了很多内容，想完全以 GitHub 上当前版本为准。</p>
+
+      <h3>场景 C：回滚到某一次历史提交</h3>
+      <pre><code>cd ~/.openclaw/workspace
+
+# 查看简短历史
+git log --oneline</code></pre>
+      <p>输出示例：</p>
+      <pre><code>a1b2c3d backup: update workspace rules
+d4e5f6g backup: update AGENTS and MEMORY
+h7i8j9k init: backup openclaw workspace</code></pre>
+      <p>确认目标提交后，执行：</p>
+      <pre><code># 将整个工作区强制回滚到指定历史点
+git reset --hard d4e5f6g</code></pre>
+      <p>如果你还想让 GitHub 远程仓库也跟着恢复到这个旧版本，再执行：</p>
+      <pre><code># 警告：会改写远程历史，仅适合个人私有备份仓库谨慎使用
+git push --force</code></pre>
+
+      <h3>场景 D：本地工作区被删了，重新从 GitHub 拉回</h3>
+      <pre><code># 先把旧目录挪走，避免冲突；如果目录本来就没有，这一步会自动忽略报错
+mv ~/.openclaw/workspace ~/.openclaw/workspace.bak 2>/dev/null
+
+# 从 GitHub 把整个工作区重新拉回到 OpenClaw 默认工作区路径
+git clone git@github.com:你的用户名/你的仓库名.git ~/.openclaw/workspace</code></pre>
+      <p>适用：本地目录误删、换机器、需要完整恢复工作区。</p>
+    </section>
+
+    <section class="section" id="full">
+      <h2>7. 完整状态备份补充方案</h2>
+      <p>如果你的目标不仅是恢复工作区文件，还包括恢复 OpenClaw 的完整状态，那么还需要额外备份整个 <code>~/.openclaw/</code> 目录。</p>
+      <pre><code># 停止相关进程后再做归档更稳妥
+openclaw gateway stop
+
+# 进入 home 目录
+cd ~
+
+# 打包整个 .openclaw 状态目录
+tar -czf openclaw-state-$(date +%F).tgz .openclaw</code></pre>
+      <p>恢复后建议执行：</p>
+      <pre><code># 让 OpenClaw 检查并修复配置/状态兼容问题
+openclaw doctor</code></pre>
+      <div class="warn">不建议把包含凭据、认证状态、会话数据的完整状态目录直接推到 GitHub；更稳妥的方式是做本地或加密存储。</div>
+    </section>
+
+    <section class="section" id="sop">
+      <h2>8. 最短可执行版 SOP</h2>
+      <h3>首次接入</h3>
+      <pre><code>cd ~/.openclaw/workspace
+
+# 初始化 Git 仓库
+git init
+git branch -M main
+
+# 创建忽略规则
+cat > .gitignore <<'EOF'
+*.log
+*.tmp
+.DS_Store
+EOF
+
+# 检查状态
+git status
+
+# 加入暂存区
+git add .
+
+# 再检查一次
+git status
+
+# 形成第一次提交
+git commit -m "init: backup openclaw workspace"
+
+# 关联 GitHub 私有仓库
+git remote add origin git@github.com:你的用户名/你的仓库名.git
+
+# 首次推送
+git push -u origin main</code></pre>
+
+      <h3>日常备份</h3>
+      <pre><code>cd ~/.openclaw/workspace
+git status
+git add .
+git commit -m "backup: update workspace"
+git push</code></pre>
+
+      <h3>单文件恢复</h3>
+      <pre><code>cd ~/.openclaw/workspace
+git fetch origin
+git checkout origin/main -- AGENTS.md</code></pre>
+
+      <h3>整体恢复到远程最新版本</h3>
+      <pre><code>cd ~/.openclaw/workspace
+git fetch origin
+git reset --hard origin/main</code></pre>
+
+      <h3>回滚到历史版本</h3>
+      <pre><code>cd ~/.openclaw/workspace
+git log --oneline
+git reset --hard 提交号</code></pre>
+
+      <h3>从 GitHub 重新恢复整个工作区</h3>
+      <pre><code>mv ~/.openclaw/workspace ~/.openclaw/workspace.bak 2>/dev/null
+git clone git@github.com:你的用户名/你的仓库名.git ~/.openclaw/workspace</code></pre>
+    </section>
+
+    <section class="section" id="sources">
+      <h2>9. 参考来源</h2>
+      <ul class="sources">
+        <li>OpenClaw：Agent Workspace — https://docs.openclaw.ai/concepts/agent-workspace</li>
+        <li>OpenClaw：Start OpenClaw — https://docs.openclaw.ai/start/openclaw</li>
+        <li>OpenClaw：Migrating — https://docs.openclaw.ai/install/migrating</li>
+        <li>OpenClaw：Doctor — https://docs.openclaw.ai/gateway/doctor</li>
+        <li>GitHub Docs：Creating a new repository — https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-new-repository</li>
+        <li>GitHub Docs：Adding locally hosted code to GitHub — https://docs.github.com/en/enterprise-server%403.19/migrations/importing-source-code/using-the-command-line-to-import-source-code/adding-locally-hosted-code-to-github</li>
+        <li>GitHub Docs：Testing your SSH connection — https://docs.github.com/en/authentication/connecting-to-github-with-ssh/testing-your-ssh-connection</li>
+        <li>GitHub Docs：Error: Permission denied (publickey) — https://docs.github.com/en/authentication/troubleshooting-ssh/error-permission-denied-publickey</li>
+      </ul>
+    </section>
+
+    <div class="footer">生成说明：本文件基于当前对话中已整理完成的操作指南制作，可直接保存、分发或继续二次编辑。</div>
+  </div>
+</body>
+</html>
